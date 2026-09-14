@@ -44,7 +44,7 @@ substitutions:
 packages:
   core:
     url: https://github.com/jnix85/esphome-waveshare-esp32-s3-audio-va
-    ref: v1.0.0     # pinned release; bump to a newer tag, or use 'main' to track latest
+    ref: v1.1.0     # pinned release; bump to a newer tag, or use 'main' to track latest
     files:
       - base/core.yaml
     refresh: 1d      # re-check the ref daily (a pinned tag never moves anyway)
@@ -52,7 +52,7 @@ packages:
   # Optional: Uncomment if your board has the DVP camera module plugged in
   # camera:
   #   url: https://github.com/jnix85/esphome-waveshare-esp32-s3-audio-va
-  #   ref: v1.0.0
+  #   ref: v1.1.0
   #   files:
   #     - base/camera.yaml
   #   refresh: 1d
