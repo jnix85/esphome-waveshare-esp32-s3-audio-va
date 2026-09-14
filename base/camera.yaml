@@ -1,0 +1,543 @@
+###############################################################################
+# Waveshare ESP32-S3-AUDIO-Board - Camera Package
+#
+# Standalone, modular camera package for the onboard DVP camera connector.
+# Provides live MJPEG video streaming to Home Assistant along with comprehensive
+# GUI controls (exposure, gain, white balance, resolution, quality, and orientation).
+#
+# HARDWARE PINOUT:
+#   Data pins: GPIO2 (D0), GPIO17 (D1), GPIO18 (D2), GPIO39 (D3),
+#              GPIO45 (D4), GPIO46 (D5), GPIO47 (D6), GPIO48 (D7)
+#   Sync/Clocks: VSYNC GPIO21, HREF GPIO1, PCLK GPIO44, XCLK GPIO43
+#   Expander (TCA9555): CAM_PWDN EXIO5 (active-low), CAM_SEL EXIO6
+#   I2C Bus: internal_i2c (GPIO11 SDA, GPIO10 SCL)
+###############################################################################
+
+substitutions:
+  # Camera hardware pins
+  camera_data_pins: [GPIO2, GPIO17, GPIO18, GPIO39, GPIO45, GPIO46, GPIO47, GPIO48]
+  camera_vsync_pin: GPIO21
+  camera_href_pin: GPIO1
+  camera_pclk_pin: GPIO44
+  camera_xclk_pin: GPIO43
+  camera_xclk_frequency: 12MHz
+  camera_power_pin:
+    tca9555: ioexp
+    number: 5
+    inverted: true
+  camera_select_pin:
+    tca9555: ioexp
+    number: 6
+
+  # Default stream settings
+  camera_name: "Camera"
+  camera_max_framerate: '15fps'
+  camera_idle_framerate: '0.1fps'
+  camera_jpeg_quality: '10'
+  camera_vertical_flip: 'true'
+  camera_horizontal_mirror: 'true'
+  camera_contrast: '0'
+  camera_brightness: '0'
+  camera_saturation: '0'
+  camera_special_effect: 'none'
+  camera_aec_mode: 'auto'
+  camera_aec2: 'false'
+  camera_ae_level: '0'
+  camera_aec_value: '300'
+  camera_agc_mode: 'auto'
+  camera_agc_value: '0'
+  camera_agc_ceiling: '2x'
+  camera_white_balance: 'auto'
+
+# -----------------------------------------------------------------------------
+# ESP32 Camera Core Component
+# -----------------------------------------------------------------------------
+esp32_camera:
+  name: "${camera_name}"
+  id: camera_dev
+  data_pins: ${camera_data_pins}
+  vsync_pin: ${camera_vsync_pin}
+  href_pin: ${camera_href_pin}
+  pixel_clock_pin: ${camera_pclk_pin}
+  external_clock:
+    pin: ${camera_xclk_pin}
+    frequency: ${camera_xclk_frequency}
+  i2c_id: internal_i2c
+
+  # Frame rate
+  max_framerate: ${camera_max_framerate}
+  idle_framerate: ${camera_idle_framerate}
+
+  # Image settings & PSRAM buffering
+  resolution: 1280X1024
+  frame_buffer_location: PSRAM
+  frame_buffer_count: 2
+  jpeg_quality: ${camera_jpeg_quality}
+  vertical_flip: ${camera_vertical_flip}
+  horizontal_mirror: ${camera_horizontal_mirror}
+  brightness: ${camera_brightness}
+  contrast: ${camera_contrast}
+  saturation: ${camera_saturation}
+  special_effect: ${camera_special_effect}
+
+  # Exposure settings
+  aec_mode: ${camera_aec_mode}
+  aec2: ${camera_aec2}
+  ae_level: ${camera_ae_level}
+  aec_value: ${camera_aec_value}
+
+  # Sensor gain settings
+  agc_mode: ${camera_agc_mode}
+  agc_gain_ceiling: ${camera_agc_ceiling}
+  agc_value: ${camera_agc_value}
+
+  # White balance
+  wb_mode: ${camera_white_balance}
+
+globals:
+  - id: defer_camera_update
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: camera_power_save
+    type: bool
+    restore_value: true
+    initial_value: 'true'
+  - id: camera_select_save
+    type: bool
+    restore_value: true
+    initial_value: 'true'
+
+esphome:
+  on_boot:
+    - priority: -100
+      then:
+        # Camera power & select lines must be asserted at boot for initial probe.
+        # Once initialized, restore user preferences.
+        - switch.control:
+            id: camera_power_switch
+            state: !lambda return id(camera_power_save);
+        - switch.control:
+            id: camera_select_switch
+            state: !lambda return id(camera_select_save);
+
+# -----------------------------------------------------------------------------
+# Home Assistant GUI Select Entities
+# -----------------------------------------------------------------------------
+select:
+  # Resolution (requires restart because frame buffer allocation depends on size)
+  - platform: template
+    name: "Camera Resolution (restart required)"
+    id: camera_resolution_select
+    icon: "mdi:aspect-ratio"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - "QVGA (320x240)"
+      - "VGA (640x480)"
+      - "SVGA (800x600)"
+      - "XGA (1024x768)"
+      - "SXGA (1280x1024)"
+      - "UXGA (1600x1200)"
+    initial_option: "SXGA (1280x1024)"
+    on_value:
+      then:
+        - lambda: |-
+            esp32_camera::ESP32CameraFrameSize fs[] = {
+              esp32_camera::ESP32_CAMERA_SIZE_320X240,
+              esp32_camera::ESP32_CAMERA_SIZE_640X480,
+              esp32_camera::ESP32_CAMERA_SIZE_800X600,
+              esp32_camera::ESP32_CAMERA_SIZE_1024X768,
+              esp32_camera::ESP32_CAMERA_SIZE_1280X1024,
+              esp32_camera::ESP32_CAMERA_SIZE_1600X1200
+            };
+            id(camera_dev).set_frame_size(fs[i]);
+
+  # Dynamic JPEG Quality
+  - platform: template
+    name: "Camera Quality"
+    id: camera_jpeg_quality_select
+    icon: "mdi:image-size-select-large"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - "Best (10)"
+      - "High (15)"
+      - "Medium (25)"
+      - "Low (40)"
+      - "Fastest (63)"
+    initial_option: "Best (10)"
+    on_value:
+      then:
+        - lambda: |-
+            int qa[] = { 10, 15, 25, 40, 63 };
+            id(camera_dev).set_jpeg_quality(qa[i]);
+            sensor_t *s = esp_camera_sensor_get();
+            if (s != nullptr) {
+              s->set_quality(s, qa[i]);
+            }
+
+  # AGC Gain Ceiling
+  - platform: template
+    name: "Camera AGC Gain Ceiling"
+    id: camera_agc_gain_select
+    icon: "mdi:car-light-high"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options: ["2x", "4x", "8x", "16x", "32x", "64x", "128x"]
+    initial_option: "2x"
+    on_value:
+      then:
+        - lambda: |-
+            esp32_camera::ESP32AgcGainCeiling agc[] = {
+              esp32_camera::ESP32_GAINCEILING_2X,
+              esp32_camera::ESP32_GAINCEILING_4X,
+              esp32_camera::ESP32_GAINCEILING_8X,
+              esp32_camera::ESP32_GAINCEILING_16X,
+              esp32_camera::ESP32_GAINCEILING_32X,
+              esp32_camera::ESP32_GAINCEILING_64X,
+              esp32_camera::ESP32_GAINCEILING_128X,
+            };
+            id(camera_dev).set_agc_gain_ceiling(agc[i]);
+            if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+              id(camera_dev).update_camera_parameters();
+            }
+
+  # White Balance Mode
+  - platform: template
+    name: "Camera White Balance Mode"
+    id: camera_wb_mode_select
+    icon: "mdi:white-balance-auto"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options: ["Auto", "Sunny", "Cloudy", "Office", "Home"]
+    initial_option: "Auto"
+    on_value:
+      then:
+        - lambda: |-
+            esp32_camera::ESP32WhiteBalanceMode wb[] = {
+              esp32_camera::ESP32_WHITE_BALANCE_AUTO,
+              esp32_camera::ESP32_WHITE_BALANCE_SUNNY,
+              esp32_camera::ESP32_WHITE_BALANCE_CLOUDY,
+              esp32_camera::ESP32_WHITE_BALANCE_OFFICE,
+              esp32_camera::ESP32_WHITE_BALANCE_HOME
+            };
+            id(camera_dev).set_white_balance_mode(wb[i]);
+            if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+              id(camera_dev).update_camera_parameters();
+            }
+
+  # Special Effects
+  - platform: template
+    name: "Camera Special Effect"
+    id: camera_special_effect_select
+    icon: "mdi:auto-fix"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options: ["None", "Negative", "Grayscale", "Red Tint", "Green Tint", "Blue Tint", "Sepia"]
+    initial_option: "None"
+    on_value:
+      then:
+        - lambda: |-
+            esp32_camera::ESP32SpecialEffect fx[] = {
+              esp32_camera::ESP32_SPECIAL_EFFECT_NONE,
+              esp32_camera::ESP32_SPECIAL_EFFECT_NEGATIVE,
+              esp32_camera::ESP32_SPECIAL_EFFECT_GRAYSCALE,
+              esp32_camera::ESP32_SPECIAL_EFFECT_RED_TINT,
+              esp32_camera::ESP32_SPECIAL_EFFECT_GREEN_TINT,
+              esp32_camera::ESP32_SPECIAL_EFFECT_BLUE_TINT,
+              esp32_camera::ESP32_SPECIAL_EFFECT_SEPIA
+            };
+            id(camera_dev).set_special_effect(fx[i]);
+            if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+              id(camera_dev).update_camera_parameters();
+            }
+
+# -----------------------------------------------------------------------------
+# Home Assistant GUI Switch Entities
+# -----------------------------------------------------------------------------
+switch:
+  - platform: template
+    name: "Camera Power"
+    id: camera_power_switch
+    icon: "mdi:camera-control"
+    entity_category: config
+    optimistic: true
+    restore_mode: DISABLED
+    on_state:
+      - lambda: |-
+          id(camera_power_gpio).control(x);
+          id(camera_power_save) = x;
+
+  - platform: gpio
+    pin: ${camera_power_pin}
+    id: camera_power_gpio
+    restore_mode: ALWAYS_ON
+    internal: true
+
+  - platform: template
+    name: "Camera Select"
+    id: camera_select_switch
+    icon: "mdi:camera-switch"
+    entity_category: config
+    optimistic: true
+    restore_mode: DISABLED
+    on_state:
+      - lambda: |-
+          id(camera_select_gpio).control(x);
+          id(camera_select_save) = x;
+
+  - platform: gpio
+    pin: ${camera_select_pin}
+    id: camera_select_gpio
+    restore_mode: ALWAYS_ON
+    internal: true
+
+  - platform: template
+    name: "Camera Rotate 180°"
+    id: camera_rotation_switch
+    icon: "mdi:rotate-3d-variant"
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    on_state:
+      - lambda: |-
+          id(camera_dev).set_horizontal_mirror(x);
+          id(camera_dev).set_vertical_flip(x);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+  - platform: template
+    name: "Camera Auto Exposure (AEC)"
+    id: camera_aec_switch
+    icon: "mdi:brightness-auto"
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    on_state:
+      - lambda: |-
+          id(camera_dev).set_aec_mode(x ? esp32_camera::ESP32_GC_MODE_AUTO : esp32_camera::ESP32_GC_MODE_MANU);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+  - platform: template
+    name: "Camera AEC2 DSP Algorithm"
+    id: camera_aec2_switch
+    icon: "mdi:image-filter-hdr"
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    on_state:
+      - lambda: |-
+          id(camera_dev).set_aec2(x);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+  - platform: template
+    name: "Camera Auto Gain (AGC)"
+    id: camera_agc_switch
+    icon: "mdi:chart-line-variant"
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    on_state:
+      - lambda: |-
+          id(camera_dev).set_agc_mode(x ? esp32_camera::ESP32_GC_MODE_AUTO : esp32_camera::ESP32_GC_MODE_MANU);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+  - platform: template
+    name: "Camera Color Bar Test Pattern"
+    id: camera_test_pattern_switch
+    icon: "mdi:checkerboard"
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    on_state:
+      - lambda: |-
+          id(camera_dev).set_test_pattern(x);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+# -----------------------------------------------------------------------------
+# Home Assistant GUI Number Sliders
+# -----------------------------------------------------------------------------
+number:
+  - platform: template
+    name: "Camera Brightness"
+    id: camera_brightness_number
+    icon: "mdi:brightness-6"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: -2
+    max_value: 2
+    step: 1
+    mode: slider
+    set_action:
+      - lambda: |-
+          id(camera_dev).set_brightness((int)x);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+  - platform: template
+    name: "Camera Contrast"
+    id: camera_contrast_number
+    icon: "mdi:contrast-box"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: -2
+    max_value: 2
+    step: 1
+    mode: slider
+    set_action:
+      - lambda: |-
+          id(camera_dev).set_contrast((int)x);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+  - platform: template
+    name: "Camera Saturation"
+    id: camera_saturation_number
+    icon: "mdi:palette-outline"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: -2
+    max_value: 2
+    step: 1
+    mode: slider
+    set_action:
+      - lambda: |-
+          id(camera_dev).set_saturation((int)x);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+  - platform: template
+    name: "Camera Exposure Compensation (AE Level)"
+    id: camera_ae_level_number
+    icon: "mdi:weather-sunny"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: -2
+    max_value: 2
+    step: 1
+    mode: slider
+    set_action:
+      - lambda: |-
+          id(camera_dev).set_ae_level((int)x);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+  - platform: template
+    name: "Camera Manual Exposure (ISO/AEC)"
+    id: camera_aec_value_number
+    icon: "mdi:camera-iris"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 300
+    min_value: 0
+    max_value: 1200
+    step: 1
+    mode: slider
+    set_action:
+      - lambda: |-
+          id(camera_dev).set_aec_value((int)x);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+  - platform: template
+    name: "Camera Manual Gain (AGC Value)"
+    id: camera_agc_value_number
+    icon: "mdi:tune"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: 0
+    max_value: 30
+    step: 1
+    mode: slider
+    set_action:
+      - lambda: |-
+          id(camera_dev).set_agc_value((int)x);
+          if (!id(defer_camera_update) && esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+
+# -----------------------------------------------------------------------------
+# Home Assistant GUI Button Entities
+# -----------------------------------------------------------------------------
+button:
+  - platform: template
+    name: "Camera Reset Settings"
+    id: reset_camera_settings
+    icon: "mdi:camera-retake-outline"
+    entity_category: config
+    on_press:
+      - lambda: id(defer_camera_update) = true;
+      - select.set_index:
+          id: camera_resolution_select
+          index: 4
+      - select.set_index:
+          id: camera_jpeg_quality_select
+          index: 0
+      - select.set_index:
+          id: camera_agc_gain_select
+          index: 0
+      - select.set_index:
+          id: camera_wb_mode_select
+          index: 0
+      - select.set_index:
+          id: camera_special_effect_select
+          index: 0
+      - switch.turn_on: camera_rotation_switch
+      - switch.turn_on: camera_aec_switch
+      - switch.turn_off: camera_aec2_switch
+      - switch.turn_on: camera_agc_switch
+      - switch.turn_off: camera_test_pattern_switch
+      - number.set:
+          id: camera_ae_level_number
+          value: 0
+      - number.set:
+          id: camera_aec_value_number
+          value: 300
+      - number.set:
+          id: camera_agc_value_number
+          value: 0
+      - number.set:
+          id: camera_brightness_number
+          value: 0
+      - number.set:
+          id: camera_contrast_number
+          value: 0
+      - number.set:
+          id: camera_saturation_number
+          value: 0
+      - lambda: |-
+          if (esp_camera_sensor_get() != nullptr) {
+            id(camera_dev).update_camera_parameters();
+          }
+          id(defer_camera_update) = false;

@@ -23,7 +23,7 @@ substitutions:
   # https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv - DST is
   # then handled automatically. HA can also push a zone via the set_time_zone
   # action, which overrides this and is remembered across reboots.
-  posix_timezone: "CST6CDT,M3.2.0/2:00:00,M11.1.0/2:00:00"   # Europe/Warsaw
+  posix_timezone: "CET-1CEST,M3.5.0,M10.5.0/3"   # Europe/Warsaw
 
   # Onboard amplifier volume clamps. The little speaker distorts near the top,
   # so the media player is limited to this window (0.0 - 1.0).
@@ -48,5 +48,13 @@ packages:
     files:
       - base/core.yaml
     refresh: 1d      # re-check the ref daily (a pinned tag never moves anyway)
+
+  # Optional: Uncomment if your board has the DVP camera module plugged in
+  # camera:
+  #   url: https://github.com/jnix85/esphome-waveshare-esp32-s3-audio-va
+  #   ref: v1.0.0
+  #   files:
+  #     - base/camera.yaml
+  #   refresh: 1d
 
 # Wi-Fi and the API key come from your local secrets.yaml.
